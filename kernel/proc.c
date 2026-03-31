@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+//----------------
+#define COOL_TEMP 30
+#define WARM_TEMP 60
+#define HOT_TEMP 80
 
 struct cpu cpus[NCPU];
 
@@ -36,7 +40,7 @@ void update_cpu_temp(int is_running) {
     cpu_temp = 20;
   }
 
-  // printf("CPU Temp: %d\n", cpu_temp);
+  //printf("CPU Temp: %d\n", cpu_temp);
 }
 
 
@@ -466,14 +470,40 @@ scheduler(void)
 
     for(p=proc; p<&proc[NPROC]; p++){
       acquire(&p->lock);
-      if(p->state == RUNNABLE && p->parent != 0 && strncmp(p->parent->name, "schedtest", 9) == 0){
+
+      if(p->state == RUNNABLE){
+
+    // =========================
+    // THERMAL POLICY START
+    // =========================
+        if(cpu_temp >= HOT_TEMP){
+      // When too hot, only allow low-PID (simulating critical processes)
+        if(p->pid % 2 == 0){
+          release(&p->lock);
+          continue;
+        }
+        }
+        else if(cpu_temp >= WARM_TEMP){
+        // moderate throttling: skip every third process
+        if(p->pid % 3 == 0){
+          release(&p->lock);
+          continue;
+        }
+      }
+      // =========================
+      // THERMAL POLICY END
+      // =========================
+
+      if(p->parent != 0 &&
+        strncmp(p->parent->name, "schedtest", 9) == 0){
         if(chosen == 0 || p->pid < chosen->pid){
           chosen = p;
         }
-        
       }
-      release(&p->lock);
     }
+
+    release(&p->lock);
+  }
 
     if(chosen != 0)
       found = 1;
@@ -511,19 +541,28 @@ scheduler(void)
     }
 
     if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
+      update_cpu_temp(0);
       asm volatile("wfi");
     }else{
       acquire(&chosen->lock);
       if(chosen->state == RUNNABLE){
+
+        printf("[THERMAL] Temp=%d | chosen PID=%d\n", cpu_temp, chosen ? chosen->pid : -1);
+
         chosen->state = RUNNING;
         c->proc = chosen;
+
+        update_cpu_temp(1);  // CPU heating while running
+
         swtch(&c->context, &chosen->context);
+
         c->proc = 0;
       }
       release(&chosen->lock);
     }
   }
+
+
 }
 
 // Switch to scheduler.  Must hold only p->lock
