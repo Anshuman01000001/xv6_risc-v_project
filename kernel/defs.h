@@ -9,6 +9,9 @@ struct sleeplock;
 struct stat;
 struct superblock;
 
+extern int cpu_temp;
+void update_cpu_temp(int);
+
 // bio.c
 void            binit(void);
 struct buf*     bread(uint, uint);

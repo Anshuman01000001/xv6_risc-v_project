@@ -15,10 +15,30 @@ struct proc *initproc;
 int nextpid = 1;
 struct spinlock pid_lock;
 
+int cpu_temp = 25; // starting temp
+
 extern void forkret(void);
 static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
+
+void update_cpu_temp(int is_running) {
+  if (is_running) {
+    cpu_temp += (cpu_temp > 70) ? 3 : 2;
+  }else{
+    cpu_temp -= (cpu_temp > 50) ? 2 : 1;
+  }
+
+  // max and min clamp value
+  if(cpu_temp > 100) {
+    cpu_temp = 100;
+  }else if(cpu_temp < 20) {
+    cpu_temp = 20;
+  }
+
+  // printf("CPU Temp: %d\n", cpu_temp);
+}
+
 
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the

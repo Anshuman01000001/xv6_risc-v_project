@@ -171,6 +171,12 @@ clockintr()
     release(&tickslock);
   }
 
+  if (myproc() != 0 && myproc()->state == RUNNING) {
+    update_cpu_temp(1);   // CPU is active
+  } else {
+    update_cpu_temp(0);   // CPU is idle
+  }
+
   // ask for the next timer interrupt. this also clears
   // the interrupt request. 1000000 is about a tenth
   // of a second.
