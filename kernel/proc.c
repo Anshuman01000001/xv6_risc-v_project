@@ -488,6 +488,14 @@ kwait(uint64 addr)
 //
 #define STARVE_TICKS 200  // bypass thermal gate after this many skips
 
+// Returns 1 if 'name' is a recognised thermal‑test program.
+static int
+is_thermal_test(char *name)
+{
+  return strncmp(name, "schedtest", 9) == 0 ||
+         strncmp(name, "matrix", 6) == 0;
+}
+
 // =========================================================
 //  Thermal metrics tracking  (for end-of-run summary)
 // =========================================================
@@ -662,7 +670,7 @@ scheduler(void)
         acquire(&p->lock);
         if(p->state != UNUSED && p->state != ZOMBIE &&
            p->parent != 0 &&
-           strncmp(p->parent->name, "schedtest", 9) == 0){
+           is_thermal_test(p->parent->name)){
           still_active = 1;
           release(&p->lock);
           break;
@@ -743,9 +751,9 @@ scheduler(void)
           release(&p->lock);
           continue;
         }
-        // ---- schedtest priority: lowest PID ----
+        // ---- test-program priority: lowest PID ----
         if(p->parent != 0 &&
-           strncmp(p->parent->name, "schedtest", 9) == 0){
+           is_thermal_test(p->parent->name)){
           if(!tm_had_children){
             summary_printed = 0;  // reset guard only on 0→1 transition (new run)
           }

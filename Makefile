@@ -150,6 +150,7 @@ UPROGS=\
 	$U/_bad_pipe\
 	$U/_schedtest\
 	$U/_good_pipe\
+	$U/_matrix\
 
 TAXFILES=$(wildcard $U/*.txt)
 
