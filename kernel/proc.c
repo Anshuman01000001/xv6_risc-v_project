@@ -6,9 +6,19 @@
 #include "proc.h"
 #include "defs.h"
 //----------------
-#define COOL_TEMP 30
-#define WARM_TEMP 60
-#define HOT_TEMP 80
+// ---- Thermal thresholds (CPU temperature) ----
+#define COOL_TEMP         30
+#define WARM_TEMP         60
+#define HOT_TEMP          80
+#define THROTTLE_TEMP     90   // force idle cooling above this
+
+// ---- Per-process heat tracking constants ----
+#define HEAT_INCREMENT    10   // heat gained per scheduling quantum
+#define HEAT_DECAY         2   // heat lost per idle scheduler tick
+#define MAX_HEAT         100   // cap to avoid overflow
+#define HEAT_COOL_THRESH  30   // "cool" process threshold
+#define HEAT_WARM_THRESH  60   // "warm" process threshold
+#define THERMAL_LOG_INTERVAL 10 // print thermal log every N rounds
 
 struct cpu cpus[NCPU];
 
@@ -26,21 +36,24 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
-void update_cpu_temp(int is_running) {
-  if (is_running) {
-    cpu_temp += (cpu_temp > 70) ? 3 : 2;
-  }else{
+// Update CPU temperature dynamically.
+// process_heat > 0  →  a process with that heat level is running (heating)
+// process_heat == 0 →  CPU is idle (cooling)
+void update_cpu_temp(int process_heat) {
+  if (process_heat > 0) {
+    // Heating proportional to process heat: hotter processes raise temp faster
+    int heat_factor = 1 + process_heat / 30;  // 1‒4
+    cpu_temp += heat_factor;
+  } else {
+    // Cooling when idle
     cpu_temp -= (cpu_temp > 50) ? 2 : 1;
   }
 
-  // max and min clamp value
-  if(cpu_temp > 100) {
+  // Clamp to [20, 100]
+  if(cpu_temp > 100)
     cpu_temp = 100;
-  }else if(cpu_temp < 20) {
+  else if(cpu_temp < 20)
     cpu_temp = 20;
-  }
-
-  //printf("CPU Temp: %d\n", cpu_temp);
 }
 
 
@@ -150,6 +163,7 @@ found:
   p->state = USED;
 
   p->waiting_tick = 0;
+  p->heat = 0;              // new process starts cool
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -194,6 +208,7 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->heat = 0;
   p->state = UNUSED;
 }
 
@@ -454,105 +469,149 @@ scheduler(void)
   struct proc *p;
   struct cpu *c = mycpu();
   struct proc *chosen = 0;
+  static int sched_round = 0;   // for periodic thermal logging
 
   c->proc = 0;
   for(;;){
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting. Then turn them back off
-    // to avoid a possible race between an interrupt
-    // and wfi.
+    // Enable interrupts briefly to avoid deadlock if all procs wait.
     intr_on();
     intr_off();
 
-    int found = 0;
     chosen = 0;
+    sched_round++;
 
-    for(p=proc; p<&proc[NPROC]; p++){
+    // =========================================================
+    //  STEP 1 – Heat decay for every idle (non‑RUNNING) process
+    // =========================================================
+    for(p = proc; p < &proc[NPROC]; p++){
       acquire(&p->lock);
-
-      if(p->state == RUNNABLE){
-
-    // =========================
-    // THERMAL POLICY START
-    // =========================
-        if(cpu_temp >= HOT_TEMP){
-      // When too hot, only allow low-PID (simulating critical processes)
-        if(p->pid % 2 == 0){
-          release(&p->lock);
-          continue;
-        }
-        }
-        else if(cpu_temp >= WARM_TEMP){
-        // moderate throttling: skip every third process
-        if(p->pid % 3 == 0){
-          release(&p->lock);
-          continue;
+      if(p->state == RUNNABLE || p->state == SLEEPING){
+        if(p->heat > 0){
+          p->heat -= HEAT_DECAY;
+          if(p->heat < 0) p->heat = 0;
         }
       }
-      // =========================
-      // THERMAL POLICY END
-      // =========================
-
-      if(p->parent != 0 &&
-        strncmp(p->parent->name, "schedtest", 9) == 0){
-        if(chosen == 0 || p->pid < chosen->pid){
-          chosen = p;
-        }
-      }
+      release(&p->lock);
     }
 
-    release(&p->lock);
-  }
+    // =========================================================
+    //  STEP 2 – Active throttle: force idle when CPU is too hot
+    // =========================================================
+    if(cpu_temp >= THROTTLE_TEMP){
+      if(sched_round % THERMAL_LOG_INTERVAL == 0)
+        printf("  [COOLING] Temp: %d/%d  | Throttling -- idle cycle to cool down\n", cpu_temp, THROTTLE_TEMP);
+      update_cpu_temp(0);  // idle cooling
+      asm volatile("wfi");
+      continue;            // restart scheduler loop without running anyone
+    }
 
-    if(chosen != 0)
-      found = 1;
+    // =========================================================
+    //  STEP 3 – Thermal‑aware process selection
+    // =========================================================
 
-    if(chosen == 0){
-      for(p = proc; p < &proc[NPROC]; p++) {
-        acquire(&p->lock);
-        if(p->state == RUNNABLE) {
-          // Switch to chosen process.  It is the process's job
-          // to release its lock and then reacquire it
-          // before jumping back to us.
-          chosen = p;
-          found = 1;
+    // --- Pass A: among schedtest children, pick lowest PID that
+    //             passes the thermal gate.
+    for(p = proc; p < &proc[NPROC]; p++){
+      acquire(&p->lock);
+      if(p->state == RUNNABLE){
+        // ---- thermal gate ----
+        if(cpu_temp >= HOT_TEMP && p->heat >= HEAT_COOL_THRESH){
           release(&p->lock);
-          break;
-          // p->state = RUNNING;
-          // c->proc = p;
-          // swtch(&c->context, &p->context);
+          continue;   // CPU hot → skip hot processes
+        }
+        if(cpu_temp >= WARM_TEMP && p->heat >= HEAT_WARM_THRESH){
+          release(&p->lock);
+          continue;   // CPU warm → skip very hot processes
+        }
+        // ---- schedtest priority: lowest PID ----
+        if(p->parent != 0 &&
+           strncmp(p->parent->name, "schedtest", 9) == 0){
+          if(chosen == 0 || p->pid < chosen->pid)
+            chosen = p;
+        }
+      }
+      release(&p->lock);
+    }
 
-          // // Process is done running for now.
-          // // It should have changed its p->state before coming back.
-          // c->proc = 0;
-          
+    // --- Pass B: if no schedtest child found, pick the RUNNABLE
+    //             process with the *lowest heat* that passes the
+    //             thermal gate (thermal‑aware, prefer cooler procs).
+    if(chosen == 0){
+      int lowest_heat = MAX_HEAT + 1;
+      for(p = proc; p < &proc[NPROC]; p++){
+        acquire(&p->lock);
+        if(p->state == RUNNABLE){
+          // thermal gate
+          if(cpu_temp >= HOT_TEMP && p->heat >= HEAT_COOL_THRESH){
+            release(&p->lock);
+            continue;
+          }
+          if(cpu_temp >= WARM_TEMP && p->heat >= HEAT_WARM_THRESH){
+            release(&p->lock);
+            continue;
+          }
+          if(p->heat < lowest_heat){
+            chosen = p;
+            lowest_heat = p->heat;
+          }
         }
         release(&p->lock);
       }
     }
 
-    for(p = proc; p < &proc[NPROC]; p++) {
+    // --- Pass C: anti‑starvation fallback – if every RUNNABLE
+    //             process was throttled, pick *any* RUNNABLE.
+    if(chosen == 0){
+      for(p = proc; p < &proc[NPROC]; p++){
+        acquire(&p->lock);
+        if(p->state == RUNNABLE){
+          chosen = p;
+          release(&p->lock);
+          break;
+        }
+        release(&p->lock);
+      }
+    }
+
+    // =========================================================
+    //  STEP 4 – Bookkeeping for non‑chosen RUNNABLE procs
+    // =========================================================
+    for(p = proc; p < &proc[NPROC]; p++){
       acquire(&p->lock);
-      if(p->state == RUNNABLE && p != chosen) {
+      if(p->state == RUNNABLE && p != chosen){
         p->waiting_tick++;
       }
       release(&p->lock);
     }
 
-    if(found == 0) {
-      update_cpu_temp(0);
+    // =========================================================
+    //  STEP 5 – Context‑switch (or idle)
+    // =========================================================
+    if(chosen == 0){
+      update_cpu_temp(0);  // idle cooling
       asm volatile("wfi");
-    }else{
+    } else {
       acquire(&chosen->lock);
       if(chosen->state == RUNNABLE){
-
-        printf("[THERMAL] Temp=%d | chosen PID=%d\n", cpu_temp, chosen ? chosen->pid : -1);
+        // --- Periodic thermal log ---
+        if(sched_round % THERMAL_LOG_INTERVAL == 0){
+          char *zone = "COOL";
+          if(cpu_temp >= 80) zone = "HOT ";
+          else if(cpu_temp >= 60) zone = "WARM";
+          printf("  [THERMAL] Temp: %d [%s] | PID: %d | Heat: %d | %s\n",
+                 cpu_temp, zone, chosen->pid, chosen->heat, chosen->name);
+        }
 
         chosen->state = RUNNING;
         c->proc = chosen;
 
-        update_cpu_temp(1);  // CPU heating while running
+        // Increment process heat proportional to running
+        chosen->heat += HEAT_INCREMENT;
+        if(chosen->heat > MAX_HEAT)
+          chosen->heat = MAX_HEAT;
+
+        // CPU temp rises based on the running process's heat
+        update_cpu_temp(chosen->heat);
 
         swtch(&c->context, &chosen->context);
 
@@ -561,8 +620,6 @@ scheduler(void)
       release(&chosen->lock);
     }
   }
-
-
 }
 
 // Switch to scheduler.  Must hold only p->lock
@@ -787,7 +844,7 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    printf("%d %s %s", p->pid, state, p->name);
+    printf("%d %s %s heat=%d", p->pid, state, p->name, p->heat);
     printf("\n");
   }
 }
@@ -822,8 +879,25 @@ kps(char *arguments)
         printf("%d\t%s\t\t%s\n", p->pid, states[p->state], p->name);
       }
     }
+  }else if(strncmp(arguments, "-t", 2)==0){
+    // Thermal / heat monitoring view
+    printf("===== Thermal Monitor =====\n");
+    printf("CPU Temperature: %d / 100", cpu_temp);
+    if(cpu_temp >= 80)
+      printf("  [HOT]\n");
+    else if(cpu_temp >= 60)
+      printf("  [WARM]\n");
+    else
+      printf("  [COOL]\n");
+    printf("\nPID\tSTATE\t\tHEAT\tNAME\n");
+    printf("---------------------------------------\n");
+    for(p=proc; p<&proc[NPROC]; p++){
+      if (p->state != UNUSED){
+        printf("%d\t%s\t\t%d\t%s\n", p->pid, states[p->state], p->heat, p->name);
+      }
+    }
   }else{
-    printf("Usage: ps [-o | -l]\n");
+    printf("Usage: ps [-o | -l | -t]\n");
   }
 
   return 0;

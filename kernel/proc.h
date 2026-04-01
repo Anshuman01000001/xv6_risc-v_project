@@ -93,6 +93,7 @@ struct proc {
   int pid;                     // Process ID
 
   int waiting_tick;
+  int heat;                    // Thermal heat score (0 – MAX_HEAT)
 
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
