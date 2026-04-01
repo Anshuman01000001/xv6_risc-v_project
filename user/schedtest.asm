@@ -60,7 +60,7 @@ void child_process(int child_id) {
         burst_input = (NCHILD - child_id + 1);
   4a:	4919                	li	s2,6
   4c:	40a9093b          	subw	s2,s2,a0
-        // burst_input = child_id;
+        //burst_input = child_id;
         cpu_burst(burst_input);
   50:	854a                	mv	a0,s2
   52:	fafff0ef          	jal	0 <cpu_burst>

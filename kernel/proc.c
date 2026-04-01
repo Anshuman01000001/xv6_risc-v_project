@@ -640,6 +640,7 @@ scheduler(void)
   struct cpu *c = mycpu();
   struct proc *chosen = 0;
   static int sched_round = 0;   // for periodic thermal logging
+  static int summary_printed = 0; // guard: only print summary once per run
   int skipped;                   // count of thermally-skipped procs this round
 
   c->proc = 0;
@@ -655,7 +656,7 @@ scheduler(void)
     // =========================================================
     //  STEP 0 – Detect end of schedtest and print summary
     // =========================================================
-    if(tm_had_children){
+    if(tm_had_children && !summary_printed){
       int still_active = 0;
       for(p = proc; p < &proc[NPROC]; p++){
         acquire(&p->lock);
@@ -669,6 +670,7 @@ scheduler(void)
         release(&p->lock);
       }
       if(!still_active){
+        summary_printed = 1;   // set BEFORE printing to block other CPUs
         tm_print_summary();
         tm_reset();
       }
@@ -744,6 +746,9 @@ scheduler(void)
         // ---- schedtest priority: lowest PID ----
         if(p->parent != 0 &&
            strncmp(p->parent->name, "schedtest", 9) == 0){
+          if(!tm_had_children){
+            summary_printed = 0;  // reset guard only on 0→1 transition (new run)
+          }
           tm_had_children = 1;
           if(chosen == 0 || p->pid < chosen->pid)
             chosen = p;

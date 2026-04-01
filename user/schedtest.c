@@ -23,7 +23,7 @@ void child_process(int child_id) {
     int j;
     for (j = 0; j < 3; j++) {
         burst_input = (NCHILD - child_id + 1);
-        // burst_input = child_id;
+        //burst_input = child_id;
         cpu_burst(burst_input);
     }
 }
